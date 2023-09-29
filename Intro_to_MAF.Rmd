@@ -1,0 +1,177 @@
+---
+title: "Intro to MAF"
+author: Nicole Black, Wade Boohar
+date: 07/17/22
+updated: 09/17/23
+---
+
+***Deliverables***
+-Upload this R Notebook to your GitHub and submit the link to your Repo on BB.
+-Include any graphs or figures created in this assignment in the folder with your R notebook with descriptive file names.
+
+Since this is an optional partner activity, it is okay if your answers are the same as your partner’s as long as everyone understands it and could explain it in their own words if asked. Each person must individually push their code to Github. *At the top of your R Notebook, write the name of you and your partner(s) as a comment.*
+
+***Complete the following coding activity and answer any following questions as comments in your R Notebook***
+
+In MAF_Tutorial.Rmd, you looked at how to analyze mutation data in terms of clinical variables as well as mutation status. In this assignment, you will need to combine the two skills to demonstrate your understanding of categorical variables and R data structures.
+
+*Pre-Assignment*
+Load all necessary packages, read in the clinical data .csv file you have in your analysis_data folder, and instantiate the MAF_object.
+```{r}
+#Set pathway
+knitr::opts_knit$set(root.dir = normalizePath("/Users/tomasmanea/desktop/QBIO490/qbio_490_tomas/analysis_data")) 
+
+#Packages needed
+library(ggplot2)
+library(TCGAbiolinks)
+library(survival)
+library(survminer)
+library(maftools)
+
+#Reading in clinical data 
+clinical <- read.csv("/Users/tomasmanea/desktop/QBIO490/qbio_490_tomas/analysis_data/brca_clinical_data.csv")
+
+#adjusting for maf file 
+colnames(clinical)[ colnames(clinical) == "bcr_patient_barcode" ] <- "Tumor_Samp_Barcode"
+
+#Saving new file
+write.csv(clinical,"/Users/tomasmanea/desktop/QBIO490/qbio_490_tomas/analysis_data/brca_clinical_data.csv", row.names = FALSE)
+
+#Initializing MAF 
+maf_query <- GDCquery(
+    project = "TCGA-BRCA", 
+    data.category = "Simple Nucleotide Variation", 
+    access = "open", # we only have access to somatic mutations which are open access
+    data.type = "Masked Somatic Mutation", 
+    workflow.type = "Aliquot Ensemble Somatic Variant Merging and Masking"
+)
+
+GDCdownload(maf_query)
+maf <- GDCprepare(maf_query)
+
+#Creation of MAF object
+maf_object <- read.maf(maf = maf,
+                       clinicalData = clinical, 
+                       isTCGA = TRUE)
+
+
+```
+
+
+*1*
+Choose a clinical variable (or any variable from clin_rad or clin_drug) to separate your populations into two different groups and rewrite the column or create a new column with that variable as a factor. ***Do not use age or vital_status as your clinical variable.*** Hint: if your variable is continuous, you will need to determine your own cutoffs for the different levels of the factor. If your variable is categorical and has more than two possible values, choose the two that are the most common.
+```{r}
+#Setting up Clinical variable 
+head(maf_object@data)
+er_status_by_ihc_mask <- ifelse(maf_object@clinical.data$er_status_by_ihc == '[Not Available]', T, F)
+
+clinical_mask <- clinical[er_status_by_ihc_mask,]
+
+clinical_mask$er_status_by_ihc <- factor(clinical_mask$er_status_by_ihc)
+
+
+```
+
+
+*2*
+Create a co-oncoplot with the top 10-20 (you choose) most mutated genes for the two groups. Pick one that has a large discrepancy in % mutated or type of mutations between the groups and research it. 
+Research it. What is the gene used for? Can you think of any reason for the discrepancy?
+```{r}
+#Storing young patient barcodes
+positive_mask <- ifelse(maf_object@clinical.data$er_status_by_ihc == 'Positive', T, F)
+positive_patient_status <- maf_object@clinical.data$Tumor_Sample_Barcode[positive_mask]
+
+#Subset Young_maf 
+positive_maf <- subsetMaf(maf = maf_object,
+                       tsb = positive_patient_status)
+
+#Storing & Subset Old_maf
+negative_patient_status <- maf_object@clinical.data$Tumor_Sample_Barcode[!positive_mask]
+negative_maf <- subsetMaf(maf = maf_object,
+                       tsb = negative_patient_status)
+#Creating Co-onco plot
+coOncoplot(m1 = positive_maf, 
+           m2 = negative_maf, 
+           m1Name = 'Estrogen Receptor Postive Patients', 
+           m2Name = 'Estrogen Receptor Negative Patients', 
+           borderCol = NA)
+
+ggsave("/Users/tomasmanea/desktop/QBIO490/qbio_490_tomas/analysis_data/coOncoplot_TTN_Er_Status.pdf")
+
+
+```
+
+
+*3*
+Create a contingency table with your variable and chosen gene. Run a Fisher’s Exact Test between presence of mutations for that gene and your clinical variable. Create and save a mosaic plot. 
+Interpret the output of the Fisher’s Exact Test in terms of the odds ratio and p-value.
+```{r}
+
+#Setting up boolean masks for maf_object 
+TNN_mask <- ifelse(maf_object@data$Hugo_Symbol == "TTN", T, F)
+TTN_patients <- maf_object@data$Tumor_Sample_Barcode[TNN_mask]
+length(TTN_patients)
+
+#Initializing maf_object
+maf_object@clinical.data$ttn <- maf_object@clinical.data$Tumor_Sample_Barcode %in% TTN_patients
+maf_object@clinical.data$ttn <- ifelse(maf_object@clinical.data$ttn == "TRUE", "Mutation", "No Mutation")
+maf_object@clinical.data$ttn <- factor(maf_object@clinical.data$ttn, levels = c("Mutation", "No Mutation"))
+
+#Print maf_object
+print(maf_object@clinical.data$er_status_by_ihc)
+print(maf_object@clinical.data$ttn)
+
+# view the contingency table
+contig <- table(maf_object@clinical.data$er_status_by_ihc, maf_object@clinical.data$ttn)
+
+#Run Fischer Test
+fisher_test <- fisher.test(contig)
+fisher_test
+
+#P-Value and Odds Ratio
+#P-Value - 0.1375
+#Odds Ratio - N/A
+
+# view the contingency table as a mosaic
+mosaicplot(contig)
+
+ggsave("/Users/tomasmanea/desktop/QBIO490/qbio_490_tomas/analysis_data/mosaicplot_TTN_Er_Status.pdf")
+
+```
+
+
+
+*4*
+Subset your maf_object based on your chosen clinical variable and create a co-lollipop plot of your chosen gene divided between the two different clinical variable possibilities. Include descriptive names on your plot.
+Do you notice any difference in terms of mutations (e.g. sites, types, number) between the two populations?
+```{r}
+#Subset completed for prior Contingency Table
+#Create co-lollipop plot
+lollipopPlot2(m1 = positive_maf, 
+              m2 = negative_maf, 
+              m1_name = 'Estrogen Receptor Postive Patients',
+              m2_name = 'Estrogen Receptor Negative Patients',
+              gene = "TTN") ## pick any gene of your choosing to fill in here
+
+ggsave("/Users/tomasmanea/desktop/QBIO490/qbio_490_tomas/analysis_data/ollipop_TP53_BRCA.pdf")
+
+#Lots of missense mutations across both variable populations; likewise, we can see that there is a significantly great number of positive patients than negative patients (positive serving as the indication of estrogen promoting cancer growth, negative serving as estrogen fails to promote cancer growth)
+```
+
+
+*5*
+Create your Overall_Survival_Status column and create a mafSurvival KM plot based on mutations in your chosen gene.
+Does there seem to be a difference? Hypothesize why or not based on the other analysis you did with the gene above.
+```{r}
+#Creating Overall_Survival_Status column
+maf_object@clinical.data$Overall_Survival_Status <- ifelse(maf_object@clinical.data$vital_status == 'Alive', T, F)
+
+#Creating mafSruvival KM plot
+mafSurvival(maf = maf_object,
+            genes = "TTN", ## pick a gene of your choosing
+            time = "last_contact_days_to", ## maf_object@clinical.data containing survival time
+            Status = "Overall_Survival_Status", ## boolean value for death events 
+            isTCGA = TRUE)
+
+#Well, to begin with, there is not any significance in the KM Plot for survivorship because the p-value isn't significant (p-value < 0.05), therefore we cannot base any sound, scientific postulations off this graph. However, in terms of the macroscopic project, it appears that there needs to be an investigation to the nature of positive (previously defined) estrogen patients and no mutations—as I would imagine with an increase of hormones there should more biochemical variation, potentially yielding a myriad of ramifications. Furthermore, I would add that another gene should be investigated to further contextualize the results. 
+```
