@@ -1,0 +1,257 @@
+---
+title: "R_Review"
+author: "tomas"
+date: "2023-10-16"
+output: html_document
+---
+***Instructions***
+All of your code can be in a R Notebook or R script, which you will push to GitHub and provide a repo link to BlackBoard. As a part of the grading, we will check that your code runs with no errors starting from a clean environment. This means that while you can work with csv's during your drafting process, your final code should install and load all libraries and pull all dataframes from the TCGA data download. Remember to comment your code so other people can follow along. 
+
+***Knit Statement***
+```{r}
+knitr::opts_knit$set(root.dir = normalizePath("/Users/tomasmanea/desktop/QBIO490/qbio_490_tomas/analysis_data"))
+```
+
+
+
+```{r}
+#Packages Needed
+library(ggplot2)
+library(TCGAbiolinks)
+library(survival)
+library(survminer)
+library(maftools)
+
+#Clinical Data Downloaded, Queried, & Retrieved
+clin_query <- GDCquery(project = "TCGA-SKCM", data.category = "Clinical",
+data.type = "Clinical Supplement", data.format = 'BCR Biotab')
+
+GDCdownload(clin_query)
+clinical.BCRtab.all <- GDCprepare(clin_query)  
+
+#RNA_se Downloaded & Queried
+rna_query <- GDCquery(project ="TCGA-SKCM",
+                      data.category = "Transcriptome Profiling",
+                      data.type = "Gene Expression Quantification",
+                      workflow.type = "STAR - Counts")
+
+GDCdownload(rna_query)
+rna_se <- GDCprepare(rna_query)
+
+GDCdownload(clin_query)
+clinical.BCRtab.all <- GDCprepare(clin_query)  
+
+#"clinic", "drug", and "rad" DataFrames  
+clinical <- clinical.BCRtab.all$clinical_patient_skcm[-c(1,2),]
+rad <- clinical.BCRtab.all$clinical_radiation_skcm[-c(1,2),] 
+drug <- clinical.BCRtab.all$clinical_drug_skcm[-c(1,2),] 
+
+
+colnames(clinical)[ colnames(clinical) == "bcr_patient_barcode" ] <- "Tumor_Sample_Barcode"
+
+#Downloading and Querying DataSet for TCGA-SKCM 
+maf_query <- GDCquery(project = "TCGA-SKCM", 
+                  data.category = "Simple Nucleotide Variation", 
+    access = "open", # we only have access to somatic mutations which are open access
+    data.type = "Masked Somatic Mutation", 
+    workflow.type = "Aliquot Ensemble Somatic Variant Merging and Masking")
+
+GDCdownload(maf_query)
+# #Creation of MAF object / Load the data into a SummarizedExperiment object
+maf <- GDCprepare(maf_query)
+
+maf_object <- read.maf(maf = maf, clinicalData = clinical, 
+                       isTCGA = TRUE)
+
+```
+
+To do this, you must include at least the following analyses (at least 6 plots): 
+  
+***1. Difference in survival between metastatic and non-metastatic patients*** KM plot
+```{r}
+# Making sure packages are installed
+if (!require(survival)) {
+  install.packages("survival")
+}
+if (!require(survminer)) {
+  install.packages("survminer")
+}
+if (!require(ggplot2)) {
+  install.packages("ggplot2")
+}
+
+# Libraries
+library(survival)
+library(survminer)
+library(ggplot2)
+
+# Pre-Data Processing
+metastasis_status_mask <- is.na(rna_se@colData$definition)
+
+#Applying mask 
+cleaned_clinic <- rna_se@colData[!metastasis_status_mask, ]
+
+#Create a column that combines information that includes days_to_death & days_to_last_follow_up (no NA; has to be days )
+cleaned_clinic$survival_time <- ifelse(is.na(cleaned_clinic$days_to_last_follow_up), cleaned_clinic$days_to_death, cleaned_clinic$days_to_last_follow_up) 
+
+cleaned_clinic <- cleaned_clinic[!is.na(cleaned_clinic$survival_time), ]
+
+#Turning into numeric from string
+cleaned_clinic$survival_time <- as.numeric(cleaned_clinic$survival_time)
+
+#head(cleaned_clinic)
+
+#Create a column including the data from 
+cleaned_clinic$death_event <- ifelse(cleaned_clinic$vital_status == "Alive", FALSE, TRUE)
+
+
+# Creating Survminer Objects
+survival_object <- Surv(time = cleaned_clinic$survival_time,
+                        event = cleaned_clinic$death_event)
+
+
+# Creating KM Plot
+fit_object <- survfit(survival_object ~ definition, data = cleaned_clinic)
+
+# Creating KM Plot
+survplot <- ggsurvplot(fit_object,
+                       pval = TRUE,
+                       ggtheme = theme(plot.margin = unit(c(1, 1, 1, 1), "cm")),
+                       legend = 'right',
+                       risk.table = TRUE)
+
+# Customizing plot
+KM_plot <- survplot$plot + theme_bw() + theme(axis.title = element_text(size = 20), 
+                                              axis.text = element_text(size = 16),
+                                              legend.title = element_text(size = 14),
+                                              legend.text = element_text(size = 12))
+
+# Display the plot
+print(KM_plot)
+```
+
+
+***2. Mutation differences between metastatic and non-metastatic patients for multiple genes*** co-oncoplot
+```{r}
+# Match clinical information with RNA-seq data
+rna_se@colData$Tumor_Sample_Barcode <- rna_se@colData$patient
+
+# Create a mask for "metastatic" and another mask for "primary solid tumor"
+metastatic_mask <- rna_se@colData$definition %in% c("Metastatic", "Primary solid Tumor")
+non_metastatic_mask <- !metastatic_mask
+
+# Filter MAF data based on metastatic status
+metastatic_patient_status <- rna_se@colData$Tumor_Sample_Barcode[metastatic_mask]
+non_metastatic_patient_status <- rna_se@colData$Tumor_Sample_Barcode[non_metastatic_mask]
+
+# Create a new MAF object based on the metastatic status
+metastatic_maf <- subsetMaf(maf = maf_object, tsb = metastatic_patient_status)
+non_metastatic_maf <- subsetMaf(maf = maf_object, tsb = non_metastatic_patient_status)
+
+# Get the top mutated genes for each group
+top_genes_metastatic <- names(sort(table(metastatic_maf@data$Hugo_Symbol), decreasing = TRUE)[1:5])
+top_genes_non_metastatic <- names(sort(table(non_metastatic_maf@data$Hugo_Symbol), decreasing = TRUE)[1:5])
+
+# Filter MAF data for the top mutated genes
+metastatic_maf <- subsetMaf(maf = metastatic_maf, genes = top_genes_metastatic)
+non_metastatic_maf <- subsetMaf(maf = non_metastatic_maf, genes = top_genes_non_metastatic)
+
+# Load the 'ComplexHeatmap' package if not already loaded
+if (!requireNamespace("ComplexHeatmap", quietly = TRUE)) {
+  install.packages("ComplexHeatmap")
+}
+
+
+```
+
+***3. Mutation differences for specific gene of interest (one of most mutated genes) *** co-lollipop
+```{r}
+#Create co-lollipop plot
+# Creating co-lollipop plot for gene of interest (e.g., TTN)
+gene_of_interest <- "MUC16"
+positive_maf_gene <- subsetMaf(maf = metastatic_maf, genes = gene_of_interest)
+negative_maf_gene <- subsetMaf(maf = non_metastatic_maf, genes = gene_of_interest)
+
+# Create co-lollipop plot
+lollipopPlot2(m1 = positive_maf_gene, 
+              m2 = negative_maf_gene, 
+              m1_name = 'Metastatic Patients',
+              m2_name = 'Non-Metastatic Patients',
+              gene = gene_of_interest)
+
+# Save the plot
+ggsave("/Users/tomasmanea/desktop/QBIO490/qbio_490_tomas/analysis_data/coLollipop_TTN.pdf")
+
+
+``
+
+***4. Coocurrence or mutual exclusion of common gene mutations: one for metastatic patients, one for non-metastatic patients *** Somatic Interaction plot (need 2 to show metastatic and the other)
+
+```{r}
+#Metastatic
+# Subset MAF data for metastatic patients
+metastatic_patient_status <- rna_se@colData$definition == "Metastatic"
+metastatic_maf <- subsetMaf(maf = maf_object, tsb = rna_se@colData$Tumor_Sample_Barcode)
+
+# Identify commonly mutated genes in metastatic patients
+# For example, get the top N mutated genes
+top_mutated_genes_metastatic <- names(sort(table(metastatic_maf@data$Hugo_Symbol), decreasing = TRUE)[1:6])
+
+# Visualize somatic 
+somaticInteractions(maf = maf_object,
+                    top = 25,
+                    pvalue = c(0.05, 0.1))
+
+#Non-Metastatic 
+# Subset MAF data for non-metastatic patients
+non_metastatic_patient_status <- rna_se@colData$definition == "Primary solid Tumor"
+non_metastatic_maf <- subsetMaf(maf = maf_object, tsb = rna_se@colData$Tumor_Sample_Barcode[non_metastatic_patient_status])
+
+# Identify commonly mutated genes in non-metastatic patients
+# For example, get the top N mutated genes
+top_mutated_genes_non_metastatic <- names(sort(table(non_metastatic_maf@data$Hugo_Symbol), decreasing = TRUE)[1:6])
+
+# Visualize Non-somatic 
+somaticInteractions(maf = maf_object,
+                    top = 25,
+                    pvalue = c(0.05, 0.1))
+
+```
+```
+
+***5. Differential expression between non-metastatic and metastatic patients controlling (covariants for treatment effects, race, gender, and vital status) Volcano plot (for DESeq2)***
+
+```{r}
+# Load necessary libraries if not already loaded
+if (!require(DESeq2)) {
+  install.packages("DESeq2")
+}
+library(DESeq2)
+
+# Add the relevant covariates to the design formula (e.g., treatment effects, race, gender, vital_status)
+dds <- DESeqDataSetFromMatrix(
+  countData = rna_counts,     # RNA-seq counts data (replace with your actual counts data)
+  colData = rna_clinical,     # Clinical data with covariates
+  design = ~ treatment_effects + race + gender + vital_status
+)
+
+# Convert age to a numeric variable
+dds$age <- as.numeric(dds$age)
+
+# Check for unknown values and handle them if necessary
+# In this example, we'll assume that missing values in the data are NA
+# You can customize this part based on your actual data and how missing values are represented
+
+# Replace NAs in gender with a default category (e.g., "Unknown")
+dds$gender[is.na(dds$gender)] <- "Unknown"
+
+# Replace NAs in vital_status with a default category (e.g., "Unknown")
+dds$vital_status[is.na(dds$vital_status)] <- "Unknown"
+
+# Perform differential expression analysis (DESeq)
+dds <- DESeq(dds)
+
+
+
+```
+
